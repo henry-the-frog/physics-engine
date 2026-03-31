@@ -328,6 +328,17 @@ function detectCollision(a, b) {
   if (a.shape.type === 'aabb' && b.shape.type === 'aabb') {
     return aabbAABB(a, b);
   }
+  if (a.shape.type === 'polygon' && b.shape.type === 'polygon') {
+    return polygonPolygon(a, b);
+  }
+  if (a.shape.type === 'circle' && b.shape.type === 'polygon') {
+    return circlePolygon(a, b);
+  }
+  if (a.shape.type === 'polygon' && b.shape.type === 'circle') {
+    const result = circlePolygon(b, a);
+    if (result) result.normal = result.normal.mul(-1);
+    return result;
+  }
   return null;
 }
 
@@ -351,6 +362,125 @@ function aabbAABB(a, b) {
     return { normal: new Vec2(dx > 0 ? 1 : -1, 0), overlap: overlapX };
   }
   return { normal: new Vec2(0, dy > 0 ? 1 : -1), overlap: overlapY };
+}
+
+// Get world-space vertices of a polygon body
+function getWorldVertices(body) {
+  const cos = Math.cos(body.angle);
+  const sin = Math.sin(body.angle);
+  return body.shape.vertices.map(v => {
+    const rx = v.x * cos - v.y * sin;
+    const ry = v.x * sin + v.y * cos;
+    return new Vec2(body.position.x + rx, body.position.y + ry);
+  });
+}
+
+// Get edge normals for a polygon
+function getEdgeNormals(vertices) {
+  const normals = [];
+  for (let i = 0; i < vertices.length; i++) {
+    const j = (i + 1) % vertices.length;
+    const edge = vertices[j].sub(vertices[i]);
+    // Normal is perpendicular to edge
+    normals.push(new Vec2(-edge.y, edge.x).normalize());
+  }
+  return normals;
+}
+
+// Project polygon vertices onto an axis, return [min, max]
+function projectPolygon(vertices, axis) {
+  let min = Infinity, max = -Infinity;
+  for (const v of vertices) {
+    const proj = v.dot(axis);
+    if (proj < min) min = proj;
+    if (proj > max) max = proj;
+  }
+  return { min, max };
+}
+
+// SAT polygon-polygon collision
+function polygonPolygon(a, b) {
+  const vertsA = getWorldVertices(a);
+  const vertsB = getWorldVertices(b);
+  const normalsA = getEdgeNormals(vertsA);
+  const normalsB = getEdgeNormals(vertsB);
+  
+  let minOverlap = Infinity;
+  let minNormal = null;
+  
+  // Test all axes from both polygons
+  const allNormals = [...normalsA, ...normalsB];
+  for (const axis of allNormals) {
+    const projA = projectPolygon(vertsA, axis);
+    const projB = projectPolygon(vertsB, axis);
+    
+    const overlap = Math.min(projA.max - projB.min, projB.max - projA.min);
+    if (overlap <= 0) return null; // Separating axis found
+    
+    if (overlap < minOverlap) {
+      minOverlap = overlap;
+      // Normal should point from A to B
+      const d = b.position.sub(a.position);
+      minNormal = d.dot(axis) >= 0 ? axis : axis.mul(-1);
+    }
+  }
+  
+  return { normal: minNormal, overlap: minOverlap };
+}
+
+// Circle-polygon collision
+function circlePolygon(circle, polygon) {
+  const verts = getWorldVertices(polygon);
+  const center = circle.position;
+  const radius = circle.shape.radius;
+  
+  let minOverlap = Infinity;
+  let minNormal = null;
+  
+  // Test polygon edge normals
+  const normals = getEdgeNormals(verts);
+  for (const axis of normals) {
+    const proj = projectPolygon(verts, axis);
+    const circleProj = center.dot(axis);
+    const circleMin = circleProj - radius;
+    const circleMax = circleProj + radius;
+    
+    const overlap = Math.min(proj.max - circleMin, circleMax - proj.min);
+    if (overlap <= 0) return null;
+    
+    if (overlap < minOverlap) {
+      minOverlap = overlap;
+      const d = polygon.position.sub(center);
+      minNormal = d.dot(axis) >= 0 ? axis : axis.mul(-1);
+    }
+  }
+  
+  // Test axis from circle center to nearest vertex
+  let nearestVert = verts[0];
+  let nearestDist = Infinity;
+  for (const v of verts) {
+    const d = center.distance(v);
+    if (d < nearestDist) { nearestDist = d; nearestVert = v; }
+  }
+  
+  const vertAxis = nearestVert.sub(center).normalize();
+  if (vertAxis.length() > 0) {
+    const proj = projectPolygon(verts, vertAxis);
+    const circleProj = center.dot(vertAxis);
+    const circleMin = circleProj - radius;
+    const circleMax = circleProj + radius;
+    
+    const overlap = Math.min(proj.max - circleMin, circleMax - proj.min);
+    if (overlap <= 0) return null;
+    
+    if (overlap < minOverlap) {
+      minOverlap = overlap;
+      const d = polygon.position.sub(center);
+      minNormal = d.dot(vertAxis) >= 0 ? vertAxis : vertAxis.mul(-1);
+    }
+  }
+  
+  return { normal: minNormal, overlap: minOverlap };
 }
 
 function resolveCollision(a, b, collision) {
