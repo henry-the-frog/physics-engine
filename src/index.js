@@ -43,14 +43,44 @@ class Body {
     this.sleepTimer = 0;    // how long velocity has been below threshold
     this.sleepDelay = opts.sleepDelay || 0.5; // seconds below threshold before sleeping
     this.canSleep = opts.canSleep !== false; // enable sleeping by default
+    
+    // Rotation
+    this.angle = opts.angle || 0;           // radians
+    this.angularVelocity = opts.angularVelocity || 0;
+    this.torque = 0;
+    this.inertia = opts.inertia || this._computeInertia();
   }
 
   get inverseMass() { return this.isStatic ? 0 : 1 / this.mass; }
+  get inverseInertia() { return this.isStatic ? 0 : 1 / this.inertia; }
+
+  _computeInertia() {
+    if (this.shape.type === 'circle') {
+      return 0.5 * this.mass * this.shape.radius * this.shape.radius;
+    }
+    if (this.shape.type === 'aabb') {
+      const w = this.shape.width, h = this.shape.height;
+      return (1 / 12) * this.mass * (w * w + h * h);
+    }
+    return this.mass * 100;
+  }
 
   applyForce(force) {
     if (force.x === 0 && force.y === 0) return;
     if (this.isSleeping) this.wake();
     this.forces = this.forces.add(force);
+  }
+
+  applyTorque(t) {
+    if (t === 0) return;
+    if (this.isSleeping) this.wake();
+    this.torque += t;
+  }
+
+  applyForceAtPoint(force, point) {
+    this.applyForce(force);
+    const r = point.sub(this.position);
+    this.applyTorque(r.x * force.y - r.y * force.x);
   }
 
   wake() {
@@ -62,6 +92,7 @@ class Body {
     this.isSleeping = true;
     this.velocity = new Vec2();
     this.acceleration = new Vec2();
+    this.angularVelocity = 0;
   }
 
   update(dt) {
@@ -74,8 +105,16 @@ class Body {
     this.position = this.position.add(this.velocity.mul(dt));
     this.forces = new Vec2();
     
-    // Sleep check
-    if (this.canSleep && this.velocity.length() < this.sleepThreshold) {
+    // Angular integration
+    const angularAccel = this.torque / this.inertia;
+    this.angularVelocity += angularAccel * dt;
+    this.angularVelocity *= 0.999; // tiny angular damping
+    this.angle += this.angularVelocity * dt;
+    this.torque = 0;
+    
+    // Sleep check (include angular velocity)
+    const totalVelocity = this.velocity.length() + Math.abs(this.angularVelocity) * 10;
+    if (this.canSleep && totalVelocity < this.sleepThreshold) {
       this.sleepTimer += dt;
       if (this.sleepTimer >= this.sleepDelay) {
         this.sleep();
@@ -335,10 +374,29 @@ function resolveCollision(a, b, collision) {
 
   // Normal impulse (restitution)
   const e = Math.min(a.restitution, b.restitution);
-  const jN = -(1 + e) * velAlongNormal / totalInvMass;
+  
+  // Contact point (midpoint of overlap for circles)
+  const contactPoint = a.position.add(normal.mul(a.shape?.radius || 0));
+  const rA = contactPoint.sub(a.position);
+  const rB = contactPoint.sub(b.position);
+  
+  // Cross product helpers (2D)
+  const crossRAN = rA.x * normal.y - rA.y * normal.x;
+  const crossRBN = rB.x * normal.y - rB.y * normal.x;
+  
+  // Effective mass including rotational inertia
+  const effectiveMass = totalInvMass + 
+    crossRAN * crossRAN * a.inverseInertia + 
+    crossRBN * crossRBN * b.inverseInertia;
+  
+  const jN = -(1 + e) * velAlongNormal / effectiveMass;
   const normalImpulse = normal.mul(jN);
   a.velocity = a.velocity.sub(normalImpulse.mul(a.inverseMass));
   b.velocity = b.velocity.add(normalImpulse.mul(b.inverseMass));
+  
+  // Angular impulse from normal force
+  a.angularVelocity -= (rA.x * normalImpulse.y - rA.y * normalImpulse.x) * a.inverseInertia;
+  b.angularVelocity += (rB.x * normalImpulse.y - rB.y * normalImpulse.x) * b.inverseInertia;
 
   // Coulomb friction (tangential impulse)
   const mu = Math.sqrt(a.friction * a.friction + b.friction * b.friction); // combined friction
