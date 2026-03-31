@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Physics Engine Demo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1a2e; color: white; font-family: system-ui; overflow: hidden; }
+    canvas { display: block; }
+    #controls { position: fixed; top: 10px; left: 10px; z-index: 10; }
+    #controls button { 
+      padding: 8px 16px; margin: 4px; cursor: pointer; 
+      background: #16213e; color: white; border: 1px solid #0f3460; border-radius: 4px;
+      font-size: 14px;
+    }
+    #controls button:hover { background: #0f3460; }
+    #controls button.active { background: #e94560; border-color: #e94560; }
+    #info { position: fixed; bottom: 10px; left: 10px; font-size: 12px; opacity: 0.7; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <button onclick="addBalls(10)">+10 Balls</button>
+    <button onclick="addSpring()">Add Spring</button>
+    <button onclick="addChain()">Add Chain</button>
+    <button onclick="explosion()">💥 Explosion</button>
+    <button onclick="toggleGravity()">Toggle Gravity</button>
+    <button onclick="reset()">Reset</button>
+  </div>
+  <div id="info">Bodies: <span id="count">0</span> | FPS: <span id="fps">0</span></div>
+  <canvas id="canvas"></canvas>
+
+  <script type="module">
+    // Inline physics engine (browser-compatible version)
+    class Vec2 {
+      constructor(x = 0, y = 0) { this.x = x; this.y = y; }
+      add(v) { return new Vec2(this.x + v.x, this.y + v.y); }
+      sub(v) { return new Vec2(this.x - v.x, this.y - v.y); }
+      mul(s) { return new Vec2(this.x * s, this.y * s); }
+      div(s) { return new Vec2(this.x / s, this.y / s); }
+      dot(v) { return this.x * v.x + this.y * v.y; }
+      length() { return Math.sqrt(this.x * this.x + this.y * this.y); }
+      normalize() { const l = this.length(); return l > 0 ? this.div(l) : new Vec2(); }
+      distance(v) { return this.sub(v).length(); }
+    }
+
+    let nextId = 1;
+    class Body {
+      constructor(opts = {}) {
+        this.id = nextId++;
+        this.position = opts.position || new Vec2();
+        this.velocity = opts.velocity || new Vec2();
+        this.acceleration = new Vec2();
+        this.mass = opts.mass || 1;
+        this.restitution = opts.restitution || 0.7;
+        this.shape = opts.shape || { type: 'circle', radius: 10 };
+        this.isStatic = opts.isStatic || false;
+        this.forces = new Vec2();
+        this.color = opts.color || `hsl(${Math.random() * 360}, 70%, 60%)`;
+      }
+      get inverseMass() { return this.isStatic ? 0 : 1 / this.mass; }
+      applyForce(f) { this.forces = this.forces.add(f); }
+      update(dt) {
+        if (this.isStatic) return;
+        this.acceleration = this.forces.div(this.mass);
+        this.velocity = this.velocity.add(this.acceleration.mul(dt));
+        this.velocity = this.velocity.mul(0.999); // tiny damping
+        this.position = this.position.add(this.velocity.mul(dt));
+        this.forces = new Vec2();
+      }
+    }
+
+    class DistanceConstraint {
+      constructor(a, b, dist) { this.a = a; this.b = b; this.distance = dist; }
+      solve() {
+        const d = this.b.position.sub(this.a.position);
+        const cur = d.length();
+        if (cur < 0.001) return;
+        const diff = (cur - this.distance) / cur;
+        const total = this.a.inverseMass + this.b.inverseMass;
+        if (total === 0) return;
+        const c = d.mul(diff / total);
+        if (!this.a.isStatic) this.a.position = this.a.position.add(c.mul(this.a.inverseMass));
+        if (!this.b.isStatic) this.b.position = this.b.position.sub(c.mul(this.b.inverseMass));
+      }
+    }
+
+    class SpringConstraint {
+      constructor(a, b, opts = {}) {
+        this.a = a; this.b = b;
+        this.restLength = opts.restLength || a.position.distance(b.position);
+        this.stiffness = opts.stiffness || 100;
+        this.damping = opts.damping || 2;
+      }
+      apply() {
+        const d = this.b.position.sub(this.a.position);
+        const cur = d.length();
+        if (cur < 0.001) return;
+        const dir = d.normalize();
+        const disp = cur - this.restLength;
+        const springF = dir.mul(this.stiffness * disp);
+        const relVel = this.b.velocity.sub(this.a.velocity);
+        const dampF = dir.mul(this.damping * relVel.dot(dir));
+        const total = springF.add(dampF);
+        if (!this.a.isStatic) this.a.applyForce(total);
+        if (!this.b.isStatic) this.b.applyForce(total.mul(-1));
+      }
+    }
+
+    // Globals
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+    let bodies = [];
+    let constraints = [];
+    let springs = [];
+    let gravity = new Vec2(0, 500);
+    let mouseBody = null;
+    let dragging = null;
+
+    function resize() {
+      W = canvas.width = window.innerWidth;
+      H = canvas.height = window.innerHeight;
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    // Walls (static bodies)
+    function addWalls() {
+      // Floor
+      bodies.push(new Body({ position: new Vec2(W/2, H + 100), shape: { type: 'circle', radius: 100 + H * 0.02 }, isStatic: true, color: '#333' }));
+      // Left wall
+      bodies.push(new Body({ position: new Vec2(-100, H/2), shape: { type: 'circle', radius: 100 }, isStatic: true, color: '#333' }));
+      // Right wall
+      bodies.push(new Body({ position: new Vec2(W + 100, H/2), shape: { type: 'circle', radius: 100 }, isStatic: true, color: '#333' }));
+    }
+
+    function detectAndResolve(a, b) {
+      if (a.shape.type !== 'circle' || b.shape.type !== 'circle') return;
+      const d = b.position.sub(a.position);
+      const dist = d.length();
+      const minDist = a.shape.radius + b.shape.radius;
+      if (dist >= minDist || dist < 0.001) return;
+      const normal = d.normalize();
+      const overlap = minDist - dist;
+      const totalInv = a.inverseMass + b.inverseMass;
+      if (totalInv === 0) return;
+      const corr = normal.mul(overlap / totalInv);
+      a.position = a.position.sub(corr.mul(a.inverseMass));
+      b.position = b.position.add(corr.mul(b.inverseMass));
+      const relVel = b.velocity.sub(a.velocity);
+      const vn = relVel.dot(normal);
+      if (vn > 0) return;
+      const e = Math.min(a.restitution, b.restitution);
+      const j = -(1 + e) * vn / totalInv;
+      const impulse = normal.mul(j);
+      a.velocity = a.velocity.sub(impulse.mul(a.inverseMass));
+      b.velocity = b.velocity.add(impulse.mul(b.inverseMass));
+    }
+
+    function step(dt) {
+      // Apply gravity + springs
+      for (const b of bodies) {
+        if (!b.isStatic) b.applyForce(gravity.mul(b.mass));
+      }
+      for (const s of springs) s.apply();
+      
+      // Integrate
+      for (const b of bodies) b.update(dt);
+      
+      // Collisions
+      for (let i = 0; i < bodies.length; i++) {
+        for (let j = i + 1; j < bodies.length; j++) {
+          detectAndResolve(bodies[i], bodies[j]);
+        }
+      }
+      
+      // Boundary walls
+      for (const b of bodies) {
+        if (b.isStatic) continue;
+        const r = b.shape.radius;
+        if (b.position.y + r > H) { b.position.y = H - r; b.velocity.y *= -b.restitution; }
+        if (b.position.x - r < 0) { b.position.x = r; b.velocity.x *= -b.restitution; }
+        if (b.position.x + r > W) { b.position.x = W - r; b.velocity.x *= -b.restitution; }
+        if (b.position.y - r < 0) { b.position.y = r; b.velocity.y *= -b.restitution; }
+      }
+      
+      // Constraints
+      for (let iter = 0; iter < 4; iter++) {
+        for (const c of constraints) c.solve();
+      }
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+      
+      // Draw springs
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+      ctx.lineWidth = 2;
+      for (const s of springs) {
+        ctx.beginPath();
+        ctx.moveTo(s.a.position.x, s.a.position.y);
+        ctx.lineTo(s.b.position.x, s.b.position.y);
+        ctx.stroke();
+      }
+      
+      // Draw constraints
+      ctx.strokeStyle = 'rgba(255, 200, 100, 0.5)';
+      ctx.lineWidth = 2;
+      for (const c of constraints) {
+        ctx.beginPath();
+        ctx.moveTo(c.a.position.x, c.a.position.y);
+        ctx.lineTo(c.b.position.x, c.b.position.y);
+        ctx.stroke();
+      }
+      
+      // Draw bodies
+      for (const b of bodies) {
+        if (b.isStatic && b.color === '#333') continue; // skip wall bodies
+        ctx.fillStyle = b.color;
+        ctx.beginPath();
+        ctx.arc(b.position.x, b.position.y, b.shape.radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // User interactions
+    window.addBalls = function(n) {
+      for (let i = 0; i < n; i++) {
+        const r = 8 + Math.random() * 15;
+        bodies.push(new Body({
+          position: new Vec2(100 + Math.random() * (W - 200), 50 + Math.random() * 200),
+          velocity: new Vec2((Math.random() - 0.5) * 200, (Math.random() - 0.5) * 100),
+          shape: { type: 'circle', radius: r },
+          mass: r * r * 0.01,
+        }));
+      }
+    };
+
+    window.addSpring = function() {
+      const a = new Body({
+        position: new Vec2(W / 2, 100),
+        shape: { type: 'circle', radius: 8 },
+        isStatic: true, color: '#e94560',
+      });
+      const b = new Body({
+        position: new Vec2(W / 2, 250),
+        velocity: new Vec2(100, 0),
+        shape: { type: 'circle', radius: 12 },
+      });
+      bodies.push(a, b);
+      springs.push(new SpringConstraint(a, b, { restLength: 100, stiffness: 80, damping: 3 }));
+    };
+
+    window.addChain = function() {
+      const chainBodies = [];
+      const anchorX = W / 2 - 100 + Math.random() * 200;
+      const anchor = new Body({
+        position: new Vec2(anchorX, 50),
+        shape: { type: 'circle', radius: 6 },
+        isStatic: true, color: '#e94560',
+      });
+      bodies.push(anchor);
+      chainBodies.push(anchor);
+      for (let i = 0; i < 8; i++) {
+        const b = new Body({
+          position: new Vec2(anchorX + (i + 1) * 20, 50),
+          shape: { type: 'circle', radius: 5 },
+          mass: 0.5,
+        });
+        bodies.push(b);
+        constraints.push(new DistanceConstraint(chainBodies[i], b, 20));
+        chainBodies.push(b);
+      }
+    };
+
+    window.explosion = function() {
+      const cx = W / 2, cy = H / 2;
+      for (const b of bodies) {
+        if (b.isStatic) continue;
+        const d = b.position.sub(new Vec2(cx, cy));
+        const dist = d.length();
+        if (dist > 0) {
+          const force = d.normalize().mul(50000 / (dist + 50));
+          b.velocity = b.velocity.add(force);
+        }
+      }
+    };
+
+    window.toggleGravity = function() {
+      gravity = gravity.y === 0 ? new Vec2(0, 500) : new Vec2(0, 0);
+    };
+
+    window.reset = function() {
+      bodies = [];
+      constraints = [];
+      springs = [];
+      nextId = 1;
+    };
+
+    // Mouse drag
+    canvas.addEventListener('mousedown', (e) => {
+      const mx = e.clientX, my = e.clientY;
+      for (const b of bodies) {
+        if (b.isStatic) continue;
+        const d = new Vec2(mx, my).distance(b.position);
+        if (d < b.shape.radius + 5) {
+          dragging = b;
+          break;
+        }
+      }
+    });
+    canvas.addEventListener('mousemove', (e) => {
+      if (dragging) {
+        dragging.position = new Vec2(e.clientX, e.clientY);
+        dragging.velocity = new Vec2(0, 0);
+      }
+    });
+    canvas.addEventListener('mouseup', () => { dragging = null; });
+
+    // Game loop
+    let lastTime = 0;
+    let frameCount = 0;
+    let fpsTime = 0;
+    
+    function loop(time) {
+      const dt = Math.min((time - lastTime) / 1000, 0.033); // cap at 30fps minimum
+      lastTime = time;
+      
+      step(dt);
+      draw();
+      
+      frameCount++;
+      if (time - fpsTime > 1000) {
+        document.getElementById('fps').textContent = frameCount;
+        document.getElementById('count').textContent = bodies.length;
+        frameCount = 0;
+        fpsTime = time;
+      }
+      
+      requestAnimationFrame(loop);
+    }
+    
+    // Initial scene
+    addBalls(20);
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
