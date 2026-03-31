@@ -35,6 +35,7 @@ class Body {
     this.friction = opts.friction || 0;
     this.shape = opts.shape || { type: 'circle', radius: 10 };
     this.isStatic = opts.isStatic || false;
+    this.isTrigger = opts.isTrigger || false; // Triggers detect overlap but don't resolve
     this.forces = new Vec2();
     
     // Sleeping state
@@ -221,6 +222,10 @@ class World {
     this._grid = new SpatialHashGrid(this.cellSize);
     this._broadphaseChecks = 0;
     this._narrowphaseChecks = 0;
+    
+    // Event system
+    this._listeners = { collision: [], trigger: [] };
+    this._activeCollisions = new Set(); // "id1_id2" keys for tracking start/end
   }
 
   addBody(body) { this.bodies.push(body); return body; }
@@ -231,6 +236,24 @@ class World {
   
   addSpring(spring) { this.springs.push(spring); return spring; }
   removeSpring(spring) { this.springs = this.springs.filter(s => s !== spring); }
+
+  on(event, callback) {
+    if (this._listeners[event]) this._listeners[event].push(callback);
+    return this;
+  }
+
+  off(event, callback) {
+    if (this._listeners[event]) {
+      this._listeners[event] = this._listeners[event].filter(cb => cb !== callback);
+    }
+    return this;
+  }
+
+  _emit(event, data) {
+    for (const cb of this._listeners[event] || []) {
+      cb(data);
+    }
+  }
 
   step(dt) {
     // Apply gravity
@@ -271,18 +294,45 @@ class World {
   }
 
   _collideNaive() {
+    const currentCollisions = new Set();
     for (let i = 0; i < this.bodies.length; i++) {
       for (let j = i + 1; j < this.bodies.length; j++) {
         const a = this.bodies[i], b = this.bodies[j];
-        // Skip pairs where both are sleeping or static
         if ((a.isSleeping || a.isStatic) && (b.isSleeping || b.isStatic)) continue;
         this._narrowphaseChecks++;
         const collision = detectCollision(a, b);
         if (collision) {
-          resolveCollision(a, b, collision);
+          const key = a.id < b.id ? `${a.id}_${b.id}` : `${b.id}_${a.id}`;
+          currentCollisions.add(key);
+          
+          // Fire collision start if new
+          if (!this._activeCollisions.has(key)) {
+            this._emit('collision', { bodyA: a, bodyB: b, type: 'start', ...collision });
+          }
+          this._emit('collision', { bodyA: a, bodyB: b, type: 'active', ...collision });
+          
+          // Check if either body is a trigger (no physics response)
+          if (a.isTrigger || b.isTrigger) {
+            this._emit('trigger', { bodyA: a, bodyB: b, ...collision });
+          } else {
+            resolveCollision(a, b, collision);
+          }
         }
       }
     }
+    
+    // Fire collision end for pairs that stopped colliding
+    for (const key of this._activeCollisions) {
+      if (!currentCollisions.has(key)) {
+        const [idA, idB] = key.split('_').map(Number);
+        const bodyA = this.bodies.find(b => b.id === idA);
+        const bodyB = this.bodies.find(b => b.id === idB);
+        if (bodyA && bodyB) {
+          this._emit('collision', { bodyA, bodyB, type: 'end' });
+        }
+      }
+    }
+    this._activeCollisions = currentCollisions;
   }
 
   _collideWithBroadphase() {
