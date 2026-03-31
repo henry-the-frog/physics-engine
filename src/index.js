@@ -617,4 +617,140 @@ class SpringConstraint {
   }
 }
 
-module.exports = { Vec2, Body, World, SpatialHashGrid, DistanceConstraint, SpringConstraint, detectCollision, resolveCollision };
+module.exports = { Vec2, Body, World, SpatialHashGrid, DistanceConstraint, SpringConstraint, raycast, detectCollision, resolveCollision };
+
+// === Ray Casting ===
+
+/**
+ * Cast a ray from origin in direction, testing against a list of bodies.
+ * Returns the first hit: { body, point, normal, distance } or null.
+ */
+function raycast(origin, direction, bodies, maxDist = Infinity) {
+  const dir = direction.length() > 0 ? direction.mul(1 / direction.length()) : direction;
+  let closest = null;
+  let closestDist = maxDist;
+
+  for (const body of bodies) {
+    const hit = raycastBody(origin, dir, body, closestDist);
+    if (hit && hit.distance < closestDist) {
+      closest = { ...hit, body };
+      closestDist = hit.distance;
+    }
+  }
+
+  return closest;
+}
+
+/**
+ * Cast ray against a single body. Returns { point, normal, distance } or null.
+ */
+function raycastBody(origin, dir, body, maxDist) {
+  if (body.shape.type === 'circle') {
+    return raycastCircle(origin, dir, body.position, body.shape.radius, maxDist);
+  }
+  if (body.shape.type === 'aabb') {
+    const hw = body.shape.width / 2, hh = body.shape.height / 2;
+    return raycastAABB(origin, dir, 
+      new Vec2(body.position.x - hw, body.position.y - hh),
+      new Vec2(body.position.x + hw, body.position.y + hh), maxDist);
+  }
+  if (body.shape.type === 'polygon') {
+    return raycastPolygon(origin, dir, body, maxDist);
+  }
+  return null;
+}
+
+function raycastCircle(origin, dir, center, radius, maxDist) {
+  const oc = origin.sub(center);
+  const a = dir.dot(dir);
+  const b = 2 * oc.dot(dir);
+  const c = oc.dot(oc) - radius * radius;
+  const discriminant = b * b - 4 * a * c;
+  
+  if (discriminant < 0) return null;
+  
+  const sqrtD = Math.sqrt(discriminant);
+  let t = (-b - sqrtD) / (2 * a);
+  if (t < 0) t = (-b + sqrtD) / (2 * a);
+  if (t < 0 || t > maxDist) return null;
+  
+  const point = origin.add(dir.mul(t));
+  const normal = point.sub(center).mul(1 / radius);
+  
+  return { point, normal, distance: t };
+}
+
+function raycastAABB(origin, dir, min, max, maxDist) {
+  let tmin = -Infinity, tmax = Infinity;
+  let normalAxis = 0; // 0=x, 1=y
+  let normalSign = 1;
+  
+  // X axis
+  if (Math.abs(dir.x) > 0.0001) {
+    let t1 = (min.x - origin.x) / dir.x;
+    let t2 = (max.x - origin.x) / dir.x;
+    if (t1 > t2) [t1, t2] = [t2, t1];
+    if (t1 > tmin) { tmin = t1; normalAxis = 0; normalSign = dir.x > 0 ? -1 : 1; }
+    if (t2 < tmax) tmax = t2;
+  } else if (origin.x < min.x || origin.x > max.x) return null;
+  
+  // Y axis
+  if (Math.abs(dir.y) > 0.0001) {
+    let t1 = (min.y - origin.y) / dir.y;
+    let t2 = (max.y - origin.y) / dir.y;
+    if (t1 > t2) [t1, t2] = [t2, t1];
+    if (t1 > tmin) { tmin = t1; normalAxis = 1; normalSign = dir.y > 0 ? -1 : 1; }
+    if (t2 < tmax) tmax = t2;
+  } else if (origin.y < min.y || origin.y > max.y) return null;
+  
+  if (tmin > tmax || tmax < 0 || tmin > maxDist) return null;
+  
+  const t = tmin >= 0 ? tmin : tmax;
+  if (t < 0 || t > maxDist) return null;
+  
+  const point = origin.add(dir.mul(t));
+  const normal = normalAxis === 0 ? new Vec2(normalSign, 0) : new Vec2(0, normalSign);
+  
+  return { point, normal, distance: t };
+}
+
+function raycastPolygon(origin, dir, body, maxDist) {
+  const verts = body.shape.vertices.map(v => {
+    const cos = Math.cos(body.angle || 0);
+    const sin = Math.sin(body.angle || 0);
+    return new Vec2(
+      body.position.x + v.x * cos - v.y * sin,
+      body.position.y + v.x * sin + v.y * cos
+    );
+  });
+  
+  let closestT = maxDist;
+  let hitNormal = null;
+  
+  for (let i = 0; i < verts.length; i++) {
+    const j = (i + 1) % verts.length;
+    const edgeStart = verts[i];
+    const edgeDir = verts[j].sub(verts[i]);
+    
+    // Ray-segment intersection
+    const denom = dir.x * edgeDir.y - dir.y * edgeDir.x;
+    if (Math.abs(denom) < 0.0001) continue;
+    
+    const t = ((edgeStart.x - origin.x) * edgeDir.y - (edgeStart.y - origin.y) * edgeDir.x) / denom;
+    const u = ((edgeStart.x - origin.x) * dir.y - (edgeStart.y - origin.y) * dir.x) / denom;
+    
+    if (t >= 0 && t < closestT && u >= 0 && u <= 1) {
+      closestT = t;
+      // Normal perpendicular to edge, facing outward
+      hitNormal = new Vec2(-edgeDir.y, edgeDir.x);
+      const len = hitNormal.length();
+      if (len > 0) hitNormal = hitNormal.mul(1 / len);
+      // Ensure normal faces the ray origin
+      if (hitNormal.dot(dir) > 0) hitNormal = hitNormal.mul(-1);
+    }
+  }
+  
+  if (closestT >= maxDist) return null;
+  
+  return { point: origin.add(dir.mul(closestT)), normal: hitNormal, distance: closestT };
+}
