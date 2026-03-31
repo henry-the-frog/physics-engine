@@ -1,0 +1,7 @@
+{
+  "name": "tiny-physics",
+  "version": "1.0.0",
+  "description": "2D physics engine with rigid bodies, collisions, forces",
+  "main": "src/index.js",
+  "scripts": { "test": "node --test test/index.test.js" }
+}
