@@ -644,6 +644,10 @@ function resolveCollision(a, b, collision) {
       const frictionImpulse = tangentDir.mul(jT);
       a.velocity = a.velocity.sub(frictionImpulse.mul(a.inverseMass));
       b.velocity = b.velocity.add(frictionImpulse.mul(b.inverseMass));
+      
+      // Angular friction: friction creates torque at contact point
+      a.angularVelocity -= (rA.x * frictionImpulse.y - rA.y * frictionImpulse.x) * a.inverseInertia;
+      b.angularVelocity += (rB.x * frictionImpulse.y - rB.y * frictionImpulse.x) * b.inverseInertia;
     }
   }
 }

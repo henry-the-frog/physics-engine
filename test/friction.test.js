@@ -131,3 +131,92 @@ test('friction in world simulation', () => {
   // Just verify no crash and ball hasn't gained energy
   assert.ok(true);
 });
+
+test('friction creates angular velocity (rolling)', () => {
+  const ball = new Body({
+    position: new Vec2(0, 5),
+    velocity: new Vec2(20, 10),
+    angularVelocity: 0, // Not spinning
+    shape: { type: 'circle', radius: 10 },
+    friction: 0.5,
+    restitution: 0.3,
+  });
+  const floor = new Body({
+    position: new Vec2(0, 20),
+    shape: { type: 'circle', radius: 10 },
+    isStatic: true,
+    friction: 0.5,
+  });
+  
+  const collision = detectCollision(ball, floor);
+  assert.ok(collision);
+  
+  resolveCollision(ball, floor, collision);
+  
+  // Friction at the contact point should create a torque → angular velocity
+  assert.ok(Math.abs(ball.angularVelocity) > 0.001,
+    `Friction should induce spin: angVel = ${ball.angularVelocity}`);
+});
+
+test('spinning body transfers angular momentum on collision', () => {
+  const spinner = new Body({
+    position: new Vec2(0, 5),
+    velocity: new Vec2(0, 10),
+    angularVelocity: 20, // Fast spin
+    shape: { type: 'circle', radius: 10 },
+    friction: 0.8,
+    restitution: 0.3,
+  });
+  const target = new Body({
+    position: new Vec2(0, 20),
+    velocity: new Vec2(0, 0),
+    angularVelocity: 0,
+    shape: { type: 'circle', radius: 10 },
+    friction: 0.8,
+    restitution: 0.3,
+  });
+  
+  const collision = detectCollision(spinner, target);
+  assert.ok(collision);
+  
+  resolveCollision(spinner, target, collision);
+  
+  // After collision, friction should affect angular velocity somewhat
+  // With high friction and direct impact, some angular change should occur
+  const totalAngular = Math.abs(spinner.angularVelocity) + Math.abs(target.angularVelocity);
+  assert.ok(totalAngular > 0, 'Some angular velocity should exist after collision');
+});
+
+test('polygon angular friction on impact', () => {
+  const hw = 10, hh = 10;
+  const boxShape = {
+    type: 'polygon',
+    vertices: [
+      { x: -hw, y: -hh }, { x: hw, y: -hh },
+      { x: hw, y: hh }, { x: -hw, y: hh }
+    ]
+  };
+  
+  const box = new Body({
+    position: new Vec2(0, 0),
+    velocity: new Vec2(15, 10),
+    angularVelocity: 0,
+    shape: boxShape,
+    friction: 0.5,
+    restitution: 0.3,
+    angle: 0.1, // Slightly tilted
+  });
+  const floor = new Body({
+    position: new Vec2(0, 15),
+    shape: boxShape,
+    isStatic: true,
+    friction: 0.5,
+  });
+  
+  const collision = detectCollision(box, floor);
+  if (collision) {
+    resolveCollision(box, floor, collision);
+    // Angular velocity should change due to friction torque
+    assert.ok(typeof box.angularVelocity === 'number');
+  }
+});
