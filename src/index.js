@@ -849,7 +849,90 @@ class PrismaticJoint {
   }
 }
 
-module.exports = { Vec2, Body, World, SpatialHashGrid, DistanceConstraint, SpringConstraint, RevoluteJoint, PrismaticJoint, raycast, sweepTest, detectCollision, resolveCollision };
+/**
+ * Rope Constraint — a chain of distance constraints between multiple bodies
+ * Creates a flexible rope/chain by linking N bodies with distance constraints.
+ * Supports variable stiffness, iteration count, and optional anchor pinning.
+ */
+class RopeConstraint {
+  /**
+   * @param {Body[]} bodies - Ordered list of bodies forming the rope
+   * @param {object} opts
+   * @param {number} opts.segmentLength - Distance between adjacent bodies (default: auto from positions)
+   * @param {number} opts.stiffness - How rigidly constraints are enforced (0..1, default: 1)
+   * @param {number} opts.iterations - Solver iterations per step (default: 10, higher = stiffer)
+   * @param {boolean} opts.pinFirst - Pin the first body (make static-like for constraint solving)
+   * @param {boolean} opts.pinLast - Pin the last body
+   */
+  constructor(bodies, opts = {}) {
+    if (!bodies || bodies.length < 2) {
+      throw new Error('RopeConstraint requires at least 2 bodies');
+    }
+    this.bodies = bodies;
+    this.stiffness = opts.stiffness !== undefined ? opts.stiffness : 1.0;
+    this.iterations = opts.iterations || 10;
+    this.pinFirst = opts.pinFirst || false;
+    this.pinLast = opts.pinLast || false;
+
+    // Build internal distance constraints between adjacent bodies
+    this.constraints = [];
+    for (let i = 0; i < bodies.length - 1; i++) {
+      const segLen = opts.segmentLength || bodies[i].position.distance(bodies[i + 1].position);
+      this.constraints.push(new DistanceConstraint(bodies[i], bodies[i + 1], {
+        distance: segLen,
+        stiffness: this.stiffness
+      }));
+    }
+  }
+
+  get segmentCount() { return this.constraints.length; }
+  get length() {
+    return this.constraints.reduce((sum, c) => sum + c.distance, 0);
+  }
+
+  solve() {
+    // Save pinned positions
+    const firstPos = this.pinFirst ? this.bodies[0].position : null;
+    const lastPos = this.pinLast ? this.bodies[this.bodies.length - 1].position : null;
+
+    for (let iter = 0; iter < this.iterations; iter++) {
+      // Alternate solve direction for stability
+      if (iter % 2 === 0) {
+        for (let i = 0; i < this.constraints.length; i++) {
+          this.constraints[i].solve();
+        }
+      } else {
+        for (let i = this.constraints.length - 1; i >= 0; i--) {
+          this.constraints[i].solve();
+        }
+      }
+
+      // Re-pin endpoints after each iteration
+      if (firstPos) this.bodies[0].position = firstPos;
+      if (lastPos) this.bodies[this.bodies.length - 1].position = lastPos;
+    }
+  }
+
+  /**
+   * Get positions of all rope bodies (for rendering)
+   */
+  getPoints() {
+    return this.bodies.map(b => ({ x: b.position.x, y: b.position.y }));
+  }
+
+  /**
+   * Apply gravity to all non-pinned rope bodies
+   */
+  applyGravity(gravity) {
+    for (let i = 0; i < this.bodies.length; i++) {
+      if (i === 0 && this.pinFirst) continue;
+      if (i === this.bodies.length - 1 && this.pinLast) continue;
+      this.bodies[i].applyForce(gravity.mul(this.bodies[i].mass));
+    }
+  }
+}
+
+module.exports = { Vec2, Body, World, SpatialHashGrid, DistanceConstraint, SpringConstraint, RevoluteJoint, PrismaticJoint, RopeConstraint, raycast, sweepTest, detectCollision, resolveCollision };
 
 // === Continuous Collision Detection (CCD) ===
 
